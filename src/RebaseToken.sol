@@ -25,12 +25,6 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 
-///////-- Errors ---/////////
-error RebaseToken__InterestRateCannotDecrease(
-    uint256 newInterestRate,
-    uint256 oldInterestRate
-);
-
 /**
  * @title RebaseToken
  * @author BatuBlockDev
@@ -39,13 +33,18 @@ error RebaseToken__InterestRateCannotDecrease(
  * @dev This contract is an ERC20 token with the name "Rebase Token" and the symbol "RBT"
  */
 contract RebaseToken is ERC20, Ownable, AccessControl {
+    ///////-- Errors ---/////////
+    error RebaseToken__InterestRateCannotIncrease(
+        uint256 newInterestRate,
+        uint256 oldInterestRate
+    );
     ///////-- State Variables ---////////
     uint256 private constant PRECISION_FACTOR = 1e18;
-    bytes32 private constant MINT_AND_BURN_ROLE =
+    bytes32 public constant MINT_AND_BURN_ROLE =
         keccak256("MINT_AND_BURN_ROLE");
     mapping(address => uint256) private s_usersInterestRate;
     mapping(address => uint256) private s_userLastUpdateTimestamp;
-    uint256 private s_interestRate = 5e10;
+    uint256 private s_interestRate = (5 * PRECISION_FACTOR) / 1e8;
 
     //////// -- Events ---////////
     event InterestRateSet(uint256 newInterestRate);
@@ -63,8 +62,8 @@ contract RebaseToken is ERC20, Ownable, AccessControl {
      */
     function setInterestRate(uint256 _newInterestRate) external onlyOwner {
         //Check if the new interest rate is less than the current interest rate
-        if (_newInterestRate < s_interestRate) {
-            revert RebaseToken__InterestRateCannotDecrease(
+        if (_newInterestRate > s_interestRate) {
+            revert RebaseToken__InterestRateCannotIncrease(
                 _newInterestRate,
                 s_interestRate
             );
@@ -90,10 +89,14 @@ contract RebaseToken is ERC20, Ownable, AccessControl {
      */
     function mint(
         address _to,
-        uint256 _amount
+        uint256 _amount,
+        uint256 _interestRate
     ) external onlyRole(MINT_AND_BURN_ROLE) {
+        if (_interestRate == 0) {
+            _interestRate = s_interestRate;
+        }
         _minAccruedInterest(_to);
-        s_usersInterestRate[_to] = s_interestRate;
+        s_usersInterestRate[_to] = _interestRate;
         _mint(_to, _amount);
     }
 
