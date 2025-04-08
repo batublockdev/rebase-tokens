@@ -18,6 +18,7 @@ import {Client} from "@ccip/contracts/src/v0.8/ccip/libraries/Client.sol";
 contract CrossChainTest is Test {
     address owner = makeAddr("owner");
     address user = makeAddr("user");
+    uint256 SEND_VALUE = 1e5;
 
     uint256 sepoliaFork;
     uint256 arbSepoliaFork;
@@ -44,6 +45,7 @@ contract CrossChainTest is Test {
         vm.makePersistent(address(ccipLocalSimulatorFork));
 
         // deploy and configure the sepolia token
+        vm.selectFork(sepoliaFork);
         sepoliaNetworkDetails = ccipLocalSimulatorFork.getNetworkDetails(
             block.chainid
         );
@@ -65,13 +67,7 @@ contract CrossChainTest is Test {
             .acceptAdminRole(address(sepoliaToken));
         TokenAdminRegistry(sepoliaNetworkDetails.tokenAdminRegistryAddress)
             .setPool(address(sepoliaToken), address(sepoliaTokenPool));
-        configureTokenPool(
-            sepoliaFork,
-            address(sepoliaTokenPool),
-            sepoliaNetworkDetails.chainSelector,
-            address(sepoliaTokenPool),
-            address(sepoliaToken)
-        );
+
         vm.stopPrank();
 
         // deploy and configure the arb-sepolia token
@@ -82,11 +78,12 @@ contract CrossChainTest is Test {
         vm.startPrank(owner);
         arbSepoliaToken = new RebaseToken();
         arbSepoliaTokenPool = new RebaseTokenPool(
-            IERC20(address(sepoliaToken)),
+            IERC20(address(arbSepoliaToken)),
             new address[](0),
             arbSepoliaNetworkDetails.rmnProxyAddress,
             arbSepoliaNetworkDetails.routerAddress
         );
+        arbSepoliaToken.grantMintAndBurnRole(address(arbSepoliaTokenPool));
         RegistryModuleOwnerCustom(
             arbSepoliaNetworkDetails.registryModuleOwnerCustomAddress
         ).registerAdminViaOwner(address(arbSepoliaToken));
@@ -94,14 +91,22 @@ contract CrossChainTest is Test {
             .acceptAdminRole(address(arbSepoliaToken));
         TokenAdminRegistry(arbSepoliaNetworkDetails.tokenAdminRegistryAddress)
             .setPool(address(arbSepoliaToken), address(arbSepoliaTokenPool));
+        vm.stopPrank();
+
         configureTokenPool(
-            arbSepoliaFork,
-            address(arbSepoliaTokenPool),
+            sepoliaFork,
+            address(sepoliaTokenPool),
             arbSepoliaNetworkDetails.chainSelector,
             address(arbSepoliaTokenPool),
             address(arbSepoliaToken)
         );
-        vm.stopPrank();
+        configureTokenPool(
+            arbSepoliaFork,
+            address(arbSepoliaTokenPool),
+            sepoliaNetworkDetails.chainSelector,
+            address(sepoliaTokenPool),
+            address(sepoliaToken)
+        );
     }
 
     function configureTokenPool(
@@ -113,13 +118,12 @@ contract CrossChainTest is Test {
     ) public {
         vm.selectFork(fork);
         vm.prank(owner);
-        bytes[] memory remotePoolAddress = new bytes[](1);
-        remotePoolAddress[0] = abi.encode(remotePool);
+
         TokenPool.ChainUpdate[]
             memory chainsToAdd = new TokenPool.ChainUpdate[](1);
         chainsToAdd[0] = TokenPool.ChainUpdate({
             remoteChainSelector: remoteChainSelector,
-            allowed: false,
+            allowed: true,
             remotePoolAddress: abi.encode(remotePool),
             remoteTokenAddress: abi.encode(remoteTokenAddress),
             outboundRateLimiterConfig: RateLimiter.Config({
@@ -157,26 +161,69 @@ contract CrossChainTest is Test {
             data: "",
             tokenAmounts: tokenAmounts,
             feeToken: localNetworkDetails.linkAddress,
-            extraArgs: Client._argsToBytes(Client.EVMExtraArgsV1({gasLimit: 0}))
+            extraArgs: Client._argsToBytes(
+                Client.EVMExtraArgsV1({gasLimit: 500_000})
+            )
         });
         uint256 fee = IRouterClient(localNetworkDetails.routerAddress).getFee(
             remoteNetworkDeatails.chainSelector,
             message
         );
+        ccipLocalSimulatorFork.requestLinkFromFaucet(user, fee);
+        vm.prank(user);
         IERC20(localNetworkDetails.linkAddress).approve(
             localNetworkDetails.routerAddress,
             fee
         );
+        vm.prank(user);
+
         IERC20(address(localToken)).approve(
             localNetworkDetails.routerAddress,
             amountToBridge
         );
+        vm.prank(user);
         IRouterClient(localNetworkDetails.routerAddress).ccipSend(
             remoteNetworkDeatails.chainSelector,
             message
         );
-        uint256 localBalanceAfter = localToken.balanceOf(user);
-        vm.startPrank(user);
-        vm.stopPrank();
+
+        uint256 localUserInterestRate = localToken.getUserInterestRate(user);
+
+        vm.selectFork(remoteFork);
+        vm.warp(block.timestamp + 20 minutes);
+        uint256 remoteBalanceBefore = remoteToken.balanceOf(user);
+        ccipLocalSimulatorFork.switchChainAndRouteMessage(remoteFork);
+        uint256 remoteBalanceAfter = remoteToken.balanceOf(user);
+        assertEq(remoteBalanceAfter, remoteBalanceBefore + amountToBridge);
+        uint256 remoteUserInterestRate = remoteToken.getUserInterestRate(user);
+        assertEq(remoteUserInterestRate, localUserInterestRate);
+    }
+
+    function testBridgeAllTokens() public {
+        vm.selectFork(sepoliaFork);
+        vm.deal(user, SEND_VALUE);
+        vm.prank(user);
+        Vault(payable(address(vault))).deposit{value: SEND_VALUE}();
+        assertEq(sepoliaToken.balanceOf(user), SEND_VALUE);
+        bridgeTokens(
+            SEND_VALUE,
+            sepoliaFork,
+            arbSepoliaFork,
+            sepoliaNetworkDetails,
+            arbSepoliaNetworkDetails,
+            sepoliaToken,
+            arbSepoliaToken
+        );
+        vm.selectFork(arbSepoliaFork);
+        vm.warp(block.timestamp + 20 minutes);
+        bridgeTokens(
+            arbSepoliaToken.balanceOf(user),
+            arbSepoliaFork,
+            sepoliaFork,
+            arbSepoliaNetworkDetails,
+            sepoliaNetworkDetails,
+            arbSepoliaToken,
+            sepoliaToken
+        );
     }
 }
